@@ -293,15 +293,22 @@ def process_incremental_upload(uploaded_file, progress=None, status=None):
 # =====================================================================
 @st.cache_data
 def load_data():
-    conn = sqlite3.connect(DB_PATH)
-    df_clock = pd.read_sql("SELECT * FROM clock_records ORDER BY date", conn)
-    df_roster = pd.read_sql("SELECT * FROM employee_roster", conn)
-    conn.close()
+    """加载数据库数据，若数据库不存在则返回空 DataFrame"""
+    if not os.path.exists(DB_PATH):
+        return pd.DataFrame(), pd.DataFrame()
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        df_clock = pd.read_sql("SELECT * FROM clock_records ORDER BY date", conn)
+        df_roster = pd.read_sql("SELECT * FROM employee_roster", conn)
+        conn.close()
 
-    df_clock['date'] = pd.to_datetime(df_clock['date'])
-    df_clock['first_time_str'] = df_clock['first_time_str'].fillna('')
-    df_clock['last_time_str'] = df_clock['last_time_str'].fillna('')
-    return df_clock, df_roster
+        if not df_clock.empty:
+            df_clock['date'] = pd.to_datetime(df_clock['date'])
+            df_clock['first_time_str'] = df_clock['first_time_str'].fillna('')
+            df_clock['last_time_str'] = df_clock['last_time_str'].fillna('')
+        return df_clock, df_roster
+    except Exception:
+        return pd.DataFrame(), pd.DataFrame()
 
 
 def load_model():
@@ -317,8 +324,12 @@ df_clock, df_roster = load_data()
 model_info = load_model()
 
 # 在职员工列表
-active_roster = df_roster[df_roster['status'] == '在职']
-active_names = set(active_roster['name'].unique())
+if not df_roster.empty and 'status' in df_roster.columns:
+    active_roster = df_roster[df_roster['status'] == '在职']
+    active_names = set(active_roster['name'].unique())
+else:
+    active_roster = pd.DataFrame()
+    active_names = set()
 
 
 # =====================================================================
@@ -1059,13 +1070,27 @@ def page_model_info():
 # =====================================================================
 #  路由
 # =====================================================================
-if page == "数据概览":
-    page_overview()
-elif page == "部门考勤看板":
-    page_dashboard()
-elif page == "员工考勤分析":
-    page_employee()
-elif page == "离职风险预测":
-    page_prediction()
-elif page == "模型信息":
-    page_model_info()
+if active_names:
+    if page == "数据概览":
+        page_overview()
+    elif page == "部门考勤看板":
+        page_dashboard()
+    elif page == "员工考勤分析":
+        page_employee()
+    elif page == "离职风险预测":
+        page_prediction()
+    elif page == "模型信息":
+        page_model_info()
+else:
+    st.title("👋 欢迎使用考勤分析系统")
+    st.markdown("""
+    ### 开始之前
+
+    这是首次运行，数据库中没有数据。请按以下步骤操作：
+
+    1. **下载模板** ← 在左侧「格式说明 & 下载模板」中下载
+    2. **准备数据**：按模板格式填写考勤数据
+    3. **上传数据**：使用左侧的「上传」功能上传 Excel 文件
+
+    上传完成后，页面将自动刷新并显示分析看板。
+    """)
