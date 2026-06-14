@@ -601,7 +601,7 @@ def page_overview():
                 return 'color: #2ecc71'
 
             styled = df_rank.style \
-                .applymap(color_risk, subset=['风险概率']) \
+                .map(color_risk, subset=['风险概率']) \
                 .format({'风险概率': '{:.1%}'})
 
             col_left, col_right = st.columns([3, 1])
@@ -752,9 +752,20 @@ def page_dashboard():
 # =====================================================================
 def page_employee():
     st.title("员工考勤分析")
-    st.caption("仅显示在职员工。选择部门后从该部门筛选员工，查看个人考勤详情。")
+    st.caption("仅显示在职员工。可搜索全公司员工，或按部门筛选查看。")
 
     active_df = df_clock[df_clock['name'].isin(active_names)]
+
+    # 全公司员工搜索（放在最前面）
+    all_emp_names = sorted(active_names)
+    if 'emp_search' not in st.session_state:
+        st.session_state.emp_search = ''
+    emp_search = st.text_input("🔍 搜索员工姓名（全公司）", value=st.session_state.emp_search,
+                                placeholder="输入姓名快速定位员工...", key="emp_search_input")
+    st.session_state.emp_search = emp_search
+    searched_emps = [e for e in all_emp_names if emp_search.lower() in e.lower()]
+    if not searched_emps:
+        searched_emps = all_emp_names
 
     depts = sorted(active_roster['department'].unique())
 
@@ -762,30 +773,30 @@ def page_employee():
     if 'shared_dept' not in st.session_state:
         st.session_state.shared_dept = depts[0]
     if 'shared_emp' not in st.session_state:
-        st.session_state.shared_emp = None
+        st.session_state.shared_emp = searched_emps[0] if searched_emps else None
 
-    sel_dept = st.selectbox("选择部门", depts, key="shared_dept")
+    # 如果当前选中的员工不在搜索结果中，自动跳到第一个
+    if st.session_state.shared_emp not in searched_emps:
+        st.session_state.shared_emp = searched_emps[0] if searched_emps else None
 
-    dept_emps = active_roster[active_roster['department'] == sel_dept]['name'].unique()
-    if len(dept_emps) == 0:
-        st.warning("该部门无在职员工。")
-        return
+    # 根据选中员工自动确定部门
+    if st.session_state.shared_emp:
+        emp_dept = active_roster[active_roster['name'] == st.session_state.shared_emp]['department'].iloc[0]
+        if emp_dept in depts:
+            st.session_state.shared_dept = emp_dept
 
-    # 确保当前员工属于当前部门
-    if st.session_state.shared_emp not in dept_emps:
-        st.session_state.shared_emp = sorted(dept_emps)[0]
-
-    # 员工搜索筛选
-    if 'emp_search' not in st.session_state:
-        st.session_state.emp_search = ''
-    emp_search = st.text_input("🔍 搜索员工姓名", value=st.session_state.emp_search,
-                                placeholder="输入姓名筛选...", key="emp_search_input")
-    st.session_state.emp_search = emp_search
-    filtered_emps = sorted([e for e in dept_emps if emp_search.lower() in e.lower()])
-    if not filtered_emps:
-        filtered_emps = sorted(dept_emps)
-
-    sel_emp = st.selectbox("选择员工", filtered_emps, key="shared_emp")
+    col1, col2 = st.columns(2)
+    with col1:
+        sel_dept = st.selectbox("选择部门", depts, key="shared_dept")
+    with col2:
+        # 部门筛选后只显示该部门且在搜索结果中的员工
+        dept_emps = active_roster[active_roster['department'] == sel_dept]['name'].unique()
+        dept_filtered = sorted([e for e in dept_emps if e in searched_emps])
+        if not dept_filtered:
+            dept_filtered = sorted(dept_emps)
+        if st.session_state.shared_emp not in dept_filtered:
+            st.session_state.shared_emp = dept_filtered[0] if dept_filtered else None
+        sel_emp = st.selectbox("选择员工", dept_filtered, key="shared_emp")
     emp_df = active_df[active_df['name'] == sel_emp].sort_values('date')
     emp_roster = active_roster[active_roster['name'] == sel_emp].iloc[0]
 
@@ -875,32 +886,45 @@ def page_prediction():
 
     depts = sorted(active_roster['department'].unique())
 
+    # 全公司员工搜索（放在最前面）
+    all_emp_names = sorted(active_names)
+    if 'pred_emp_search' not in st.session_state:
+        st.session_state.pred_emp_search = ''
+    pred_emp_search = st.text_input("🔍 搜索员工姓名（全公司）", value=st.session_state.pred_emp_search,
+                                    placeholder="输入姓名快速定位员工...", key="pred_emp_search_input")
+    st.session_state.pred_emp_search = pred_emp_search
+    searched_emps = [e for e in all_emp_names if pred_emp_search.lower() in e.lower()]
+    if not searched_emps:
+        searched_emps = all_emp_names
+
     # 与员工考勤分析页面共享同一组 session_state
     if 'shared_dept' not in st.session_state:
         st.session_state.shared_dept = depts[0]
     if 'shared_emp' not in st.session_state:
-        st.session_state.shared_emp = None
+        st.session_state.shared_emp = searched_emps[0] if searched_emps else None
 
-    sel_dept = st.selectbox("选择部门", depts, key="shared_dept")
-    dept_emps = active_roster[active_roster['department'] == sel_dept]['name'].unique()
-    if len(dept_emps) == 0:
-        st.warning("该部门无在职员工。")
-        return
+    # 如果当前选中的员工不在搜索结果中，自动跳到第一个
+    if st.session_state.shared_emp not in searched_emps:
+        st.session_state.shared_emp = searched_emps[0] if searched_emps else None
 
-    if st.session_state.shared_emp not in dept_emps:
-        st.session_state.shared_emp = sorted(dept_emps)[0]
+    # 根据选中员工自动确定部门
+    if st.session_state.shared_emp:
+        emp_dept = active_roster[active_roster['name'] == st.session_state.shared_emp]['department'].iloc[0]
+        if emp_dept in depts:
+            st.session_state.shared_dept = emp_dept
 
-    # 员工搜索筛选
-    if 'pred_emp_search' not in st.session_state:
-        st.session_state.pred_emp_search = ''
-    pred_emp_search = st.text_input("🔍 搜索员工姓名", value=st.session_state.pred_emp_search,
-                                    placeholder="输入姓名筛选...", key="pred_emp_search_input")
-    st.session_state.pred_emp_search = pred_emp_search
-    filtered_emps = sorted([e for e in dept_emps if pred_emp_search.lower() in e.lower()])
-    if not filtered_emps:
-        filtered_emps = sorted(dept_emps)
-
-    sel_emp = st.selectbox("选择员工", filtered_emps, key="shared_emp")
+    col1, col2 = st.columns(2)
+    with col1:
+        sel_dept = st.selectbox("选择部门", depts, key="shared_dept")
+    with col2:
+        # 部门筛选后只显示该部门且在搜索结果中的员工
+        dept_emps = active_roster[active_roster['department'] == sel_dept]['name'].unique()
+        dept_filtered = sorted([e for e in dept_emps if e in searched_emps])
+        if not dept_filtered:
+            dept_filtered = sorted(dept_emps)
+        if st.session_state.shared_emp not in dept_filtered:
+            st.session_state.shared_emp = dept_filtered[0] if dept_filtered else None
+        sel_emp = st.selectbox("选择员工", dept_filtered, key="shared_emp")
 
     emp_df = active_df[active_df['name'] == sel_emp].sort_values('date')
     monthly = monthly_agg(emp_df)
