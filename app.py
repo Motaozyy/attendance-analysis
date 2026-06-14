@@ -122,7 +122,6 @@ def process_uploaded_file(uploaded_file, progress=None, status=None):
 def process_incremental_upload(uploaded_file, progress=None, status=None):
     """增量上传：仅将新月份数据追加到现有数据库"""
     from time_parser import parse_clock_data
-    import train_models as tm
     import uuid
 
     if progress:
@@ -244,27 +243,14 @@ def process_incremental_upload(uploaded_file, progress=None, status=None):
         if progress:
             progress(80)
         if status:
-            status("重新训练模型...")
+            status("创建索引...")
         conn_main.execute('CREATE INDEX idx_clock_name ON clock_records(name)')
         conn_main.execute('CREATE INDEX idx_clock_date ON clock_records(date)')
         conn_main.execute('CREATE INDEX idx_roster_name ON employee_roster(name)')
         conn_main.commit()
         conn_main.close()
 
-        # 重新训练（增量后样本可能仍不足，静默处理）
-        try:
-            df_feats = tm.extract_features()
-            if len(df_feats) >= 5:
-                n_resigned = df_feats['is_resigned'].sum()
-                if n_resigned >= 2:
-                    if status:
-                        status(f"训练三模型 (RF+XGB+LR) / {int(len(df_feats))}人样本...")
-                    if progress:
-                        progress(85)
-                    tm.train_models(df_feats)
-        except Exception:
-            pass
-
+        # 增量上传不重新训练模型，直接使用已有模型
         if progress:
             progress(100)
         if status:
@@ -278,7 +264,6 @@ def process_incremental_upload(uploaded_file, progress=None, status=None):
             msg_parts.append(f"覆盖月份: {', '.join(overwrite_ym_str)}")
         if fresh_ym_str:
             msg_parts.append(f"新增月份: {', '.join(fresh_ym_str)}")
-        msg_parts.append("模型已重新训练。")
 
         return True, "增量上传成功！" + " | ".join(msg_parts)
     except Exception as e:
@@ -566,6 +551,96 @@ def page_overview():
     | 下班 | 下班缺卡 | 无12:00后打卡记录 | 仅有上班打卡或无打卡 |
     """)
 
+    # ── 风险预测排行榜 ──
+    st.markdown("---")
+    st.subheader("离职风险预测排行榜")
+    st.caption("基于全体在职员工的集成模型风险概率从高到低排列")
+
+    local_model_page = load_model()
+    if local_model_page is not None and len(active_names) >= 3:
+        ranking_data = []
+        for emp_name in active_names:
+            emp_df_pred = df_clock[df_clock['name'] == emp_name].sort_values('date')
+            monthly_pred = monthly_agg(emp_df_pred)
+            if len(monthly_pred) >= 2:
+                result = predict_employee(monthly_pred.to_dict('records'), local_model_page)
+                ens_prob = result['ensemble_prob']
+
+                # 计算日均工作时长
+                work_hours_list = []
+                for _, row in emp_df_pred.iterrows():
+                    if row['first_time_str'] and row['last_time_str']:
+                        try:
+                            t1 = datetime.strptime(row['first_time_str'], '%H:%M')
+                            t2 = datetime.strptime(row['last_time_str'], '%H:%M')
+                            work_hours_list.append((t2 - t1).total_seconds() / 3600)
+                        except (ValueError, TypeError):
+                            pass
+                avg_hours = np.mean(work_hours_list) if work_hours_list else 0
+
+                emp_roster_row = active_roster[active_roster['name'] == emp_name]
+                dept = emp_roster_row['department'].iloc[0] if not emp_roster_row.empty else ''
+                ranking_data.append({
+                    '姓名': emp_name,
+                    '部门': dept,
+                    '风险概率': round(ens_prob, 4),
+                    '日均工作时长(h)': round(avg_hours, 1),
+                })
+
+        if ranking_data:
+            df_rank = pd.DataFrame(ranking_data)
+            df_rank = df_rank.sort_values('风险概率', ascending=False).reset_index(drop=True)
+            df_rank.index = df_rank.index + 1  # 从1开始排名
+
+            # 用颜色标注高风险
+            def color_risk(val):
+                if val >= 0.6:
+                    return 'color: #e74c3c; font-weight: bold'
+                elif val >= 0.4:
+                    return 'color: #f39c12'
+                return 'color: #2ecc71'
+
+            styled = df_rank.style \
+                .applymap(color_risk, subset=['风险概率']) \
+                .format({'风险概率': '{:.1%}'})
+
+            col_left, col_right = st.columns([3, 1])
+            with col_left:
+                st.dataframe(
+                    styled,
+                    use_container_width=True,
+                    height=min(40 * len(df_rank) + 38, 500),
+                )
+            with col_right:
+                st.metric("平均风险", f"{df_rank['风险概率'].mean():.1%}")
+                st.metric("最高风险", f"{df_rank['风险概率'].max():.1%}")
+                st.caption("风险概率≥60%需重点关注")
+
+            # 风险分布柱状图
+            fig_risk = px.histogram(df_rank, x='风险概率', nbins=20,
+                                     title='风险概率分布',
+                                     color_discrete_sequence=['#3498db'])
+            fig_risk.update_layout(height=300, xaxis_tickformat='.0%')
+            st.plotly_chart(fig_risk, use_container_width=True)
+
+            # Top 10 高风险人员
+            st.subheader("高风险人员（Top 10）")
+            top10 = df_rank.head(10).copy()
+            top10['排名'] = range(1, len(top10) + 1)
+            fig_top = px.bar(top10, x='姓名', y='风险概率', color='部门',
+                              text='日均工作时长(h)',
+                              title='Top 10 风险人员及日均工作时长',
+                              color_discrete_sequence=px.colors.qualitative.Set2)
+            fig_top.update_traces(texttemplate='%{text}h', textposition='outside')
+            fig_top.update_layout(height=400, yaxis_tickformat='.0%')
+            st.plotly_chart(fig_top, use_container_width=True)
+            st.caption("柱高=离职风险概率，标签=日平均工作时长")
+    else:
+        if local_model_page is None:
+            st.info("模型未训练，上传足够数据后自动训练以启用风险预测。")
+        else:
+            st.info("在职员工不足3人，暂不显示排行榜。")
+
 
 # =====================================================================
 #  2. 部门考勤看板（可筛选年份+月份）
@@ -700,7 +775,17 @@ def page_employee():
     if st.session_state.shared_emp not in dept_emps:
         st.session_state.shared_emp = sorted(dept_emps)[0]
 
-    sel_emp = st.selectbox("选择员工", sorted(dept_emps), key="shared_emp")
+    # 员工搜索筛选
+    if 'emp_search' not in st.session_state:
+        st.session_state.emp_search = ''
+    emp_search = st.text_input("🔍 搜索员工姓名", value=st.session_state.emp_search,
+                                placeholder="输入姓名筛选...", key="emp_search_input")
+    st.session_state.emp_search = emp_search
+    filtered_emps = sorted([e for e in dept_emps if emp_search.lower() in e.lower()])
+    if not filtered_emps:
+        filtered_emps = sorted(dept_emps)
+
+    sel_emp = st.selectbox("选择员工", filtered_emps, key="shared_emp")
     emp_df = active_df[active_df['name'] == sel_emp].sort_values('date')
     emp_roster = active_roster[active_roster['name'] == sel_emp].iloc[0]
 
@@ -805,7 +890,17 @@ def page_prediction():
     if st.session_state.shared_emp not in dept_emps:
         st.session_state.shared_emp = sorted(dept_emps)[0]
 
-    sel_emp = st.selectbox("选择员工", sorted(dept_emps), key="shared_emp")
+    # 员工搜索筛选
+    if 'pred_emp_search' not in st.session_state:
+        st.session_state.pred_emp_search = ''
+    pred_emp_search = st.text_input("🔍 搜索员工姓名", value=st.session_state.pred_emp_search,
+                                    placeholder="输入姓名筛选...", key="pred_emp_search_input")
+    st.session_state.pred_emp_search = pred_emp_search
+    filtered_emps = sorted([e for e in dept_emps if pred_emp_search.lower() in e.lower()])
+    if not filtered_emps:
+        filtered_emps = sorted(dept_emps)
+
+    sel_emp = st.selectbox("选择员工", filtered_emps, key="shared_emp")
 
     emp_df = active_df[active_df['name'] == sel_emp].sort_values('date')
     monthly = monthly_agg(emp_df)
