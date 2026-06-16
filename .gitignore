@@ -20,3 +20,14 @@ Thumbs.db
 .env
 venv/
 .venv/
+
+# 课程文档（不上传部署）
+*.docx
+
+# 无关文件
+.devcontainer/
+generate_test_data.py
+测试数据_全量替换.xls
+README.md
+*考勤*-副本*.xls
+系统演示稿.md
